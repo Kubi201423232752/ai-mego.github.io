@@ -1,0 +1,1242 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pixel Maze AI - 強化學習實驗室</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Import Map: 告訴瀏覽器去哪裡載入 React 和 Lucide 圖示 -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.263.1"
+      }
+    }
+    </script>
+
+    <!-- Babel: 讓我們可以直接在瀏覽器執行 JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        /* 優化滾動條與字體平滑度 */
+        body { 
+            -webkit-font-smoothing: antialiased; 
+            -moz-osx-font-smoothing: grayscale;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow-x: hidden;
+        }
+        /* 隱藏觸控時的藍色高亮 */
+        * {
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* 自定義滑桿樣式 */
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body class="bg-black text-white min-h-screen">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef, useCallback } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            Play, Pause, FastForward, RotateCcw, Zap, Brain, Trophy, Sliders, 
+            Smartphone, Clock, Activity, User, Gamepad2, Cpu, Grid, RefreshCw, 
+            ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Flag, CheckCircle, 
+            Sun, Moon, Music, Volume2, VolumeX, FolderOpen, SkipBack, SkipForward, 
+            Loader2, AlertCircle 
+        } from 'lucide-react';
+
+        // --- 常數定義 ---
+        const ROWS = 15;
+        const COLS = 15;
+        const WALL = 1;
+        const PATH = 0;
+        const START = 2;
+        const END = 3;
+
+        // --- 音樂設定 ---
+        const DEFAULT_AUDIO_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+        const DEFAULT_TRACK_NAME = "music";
+
+        // 方向：上, 右, 下, 左
+        const DIRECTIONS = [
+          { dr: -1, dc: 0, label: '↑' }, // Up
+          { dr: 0, dc: 1, label: '→' },  // Right
+          { dr: 1, dc: 0, label: '↓' },  // Down
+          { dr: 0, dc: -1, label: '←' }  // Left
+        ];
+
+        // --- 迷宮生成算法 ---
+        const generateMaze = (rows, cols) => {
+          const grid = Array(rows).fill(null).map(() => Array(cols).fill(WALL));
+          const isValid = (r, c) => r > 0 && r < rows - 1 && c > 0 && c < cols - 1;
+
+          const carve = (r, c) => {
+            grid[r][c] = PATH;
+            const dirs = [...DIRECTIONS].sort(() => Math.random() - 0.5);
+            for (const { dr, dc } of dirs) {
+              const nr = r + dr * 2;
+              const nc = c + dc * 2;
+              if (isValid(nr, nc) && grid[nr][nc] === WALL) {
+                grid[r + dr][c + dc] = PATH;
+                carve(nr, nc);
+              }
+            }
+          };
+
+          carve(1, 1);
+          grid[1][1] = START;
+          
+          let endR = rows - 2;
+          let endC = cols - 2;
+          while(grid[endR][endC] === WALL) {
+              endR--;
+              if (endR < 1) {
+                  endR = rows - 2;
+                  endC--;
+              }
+          }
+          grid[endR][endC] = END;
+
+          return { grid, start: { r: 1, c: 1 }, end: { r: endR, c: endC } };
+        };
+
+        // --- Q-Learning Agent ---
+        class QAgent {
+          constructor() {
+            this.qTable = {};
+            this.epsilon = 1.0; 
+            this.alpha = 0.1;
+            this.gamma = 0.9;
+          }
+
+          getStateKey(r, c) {
+            return `${r},${c}`;
+          }
+
+          getQValues(r, c) {
+            const key = this.getStateKey(r, c);
+            if (!this.qTable[key]) {
+              this.qTable[key] = [0, 0, 0, 0]; 
+            }
+            return this.qTable[key];
+          }
+
+          chooseAction(r, c) {
+            if (Math.random() < this.epsilon) {
+              return Math.floor(Math.random() * 4); 
+            } else {
+              const qValues = this.getQValues(r, c);
+              const maxQ = Math.max(...qValues);
+              const maxIndices = qValues.map((v, i) => v === maxQ ? i : -1).filter(i => i !== -1);
+              return maxIndices[Math.floor(Math.random() * maxIndices.length)];
+            }
+          }
+
+          update(r, c, action, reward, nextR, nextC, isDone) {
+            const currentQ = this.getQValues(r, c)[action];
+            const maxNextQ = isDone ? 0 : Math.max(...this.getQValues(nextR, nextC));
+            const newQ = currentQ + this.alpha * (reward + this.gamma * maxNextQ - currentQ);
+            this.qTable[this.getStateKey(r, c)][action] = newQ;
+          }
+
+          decayEpsilon(episode) {
+            this.epsilon = Math.max(0.05, Math.exp(-0.005 * episode)); 
+          }
+
+          getBestPath(start, end, grid) {
+            const path = new Set();
+            let curr = { ...start };
+            let steps = 0;
+            const maxSteps = ROWS * COLS; 
+
+            while (steps < maxSteps) {
+                const key = this.getStateKey(curr.r, curr.c);
+                path.add(key);
+
+                if (curr.r === end.r && curr.c === end.c) break;
+
+                const qValues = this.getQValues(curr.r, curr.c);
+                const maxQ = Math.max(...qValues);
+                
+                if (maxQ === 0 && !qValues.some(v => v !== 0)) break;
+
+                const action = qValues.findIndex(v => v === maxQ);
+                const { dr, dc } = DIRECTIONS[action];
+                const nextR = curr.r + dr;
+                const nextC = curr.c + dc;
+
+                if (nextR < 0 || nextR >= ROWS || nextC < 0 || nextC >= COLS || grid[nextR][nextC] === WALL) {
+                    break;
+                }
+                
+                if (path.has(this.getStateKey(nextR, nextC))) break;
+
+                curr = { r: nextR, c: nextC };
+                steps++;
+            }
+            return path;
+          }
+        }
+
+        // --- iOS Switch Component ---
+        const IOSSwitch = ({ checked, onChange }) => (
+            <button 
+                onClick={onChange}
+                className={`w-[51px] h-[31px] rounded-full relative transition-colors duration-300 ease-in-out ${checked ? 'bg-[#34C759]' : 'bg-[#E9E9EA] dark:bg-[#39393D]'}`}
+            >
+                <div className={`absolute top-[2px] left-[2px] w-[27px] h-[27px] bg-white rounded-full shadow-[0_3px_8px_rgba(0,0,0,0.15),0_1px_1px_rgba(0,0,0,0.16)] transition-transform duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${checked ? 'translate-x-[20px]' : 'translate-x-0'}`} />
+            </button>
+        );
+
+        // --- Main Component ---
+        function PixelMazeAI() {
+          const [grid, setGrid] = useState([]);
+          const [startPos, setStartPos] = useState({ r: 1, c: 1 });
+          const [agentPos, setAgentPos] = useState({ r: 1, c: 1 });
+          const [isTraining, setIsTraining] = useState(false);
+          const [gameMode, setGameMode] = useState('ai'); 
+          const [episode, setEpisode] = useState(0);
+          const [steps, setSteps] = useState(0);
+          const [currentScore, setCurrentScore] = useState(0); 
+          const [speed, setSpeed] = useState('normal');
+          const [totalSuccess, setTotalSuccess] = useState(0);
+          const [tick, setTick] = useState(0);
+          const [cellSize, setCellSize] = useState(24);
+          const [bestPath, setBestPath] = useState(new Set());
+          const [victoryData, setVictoryData] = useState(null); 
+          const [isDarkMode, setIsDarkMode] = useState(true); 
+          
+          // 音樂播放器狀態
+          const [isMusicPlaying, setIsMusicPlaying] = useState(false);
+          const [isMusicLoading, setIsMusicLoading] = useState(false); 
+          const [musicError, setMusicError] = useState(false); 
+          const [musicProgress, setMusicProgress] = useState(0);
+          const [isMuted, setIsMuted] = useState(false);
+          const [volume, setVolume] = useState(0.5); 
+          const [trackName, setTrackName] = useState(DEFAULT_TRACK_NAME);
+          
+          const audioRef = useRef(null);
+          const fileInputRef = useRef(null);
+          const isDraggingProgress = useRef(false); 
+
+          const [rewards, setRewards] = useState({
+              goal: 100,
+              wall: -10,
+              step: -1,
+              distance: 0,
+              timeLimit: 100,      
+              enableTimeLimit: false, 
+              timeoutPenalty: -1   
+          });
+
+          const agentRef = useRef(new QAgent());
+          const gridRef = useRef([]);
+          const startRef = useRef({ r: 1, c: 1 });
+          const endRef = useRef({ r: 1, c: 1 });
+          const rewardsRef = useRef(rewards);
+          const trainingLoopRef = useRef(null);
+          const currentEpisodeStepsRef = useRef(0); 
+          const currentEpisodeScoreRef = useRef(0); 
+          const agentPosRef = useRef({ r: 1, c: 1 }); 
+          
+          const isTrainingRef = useRef(isTraining);
+          const speedRef = useRef(speed);
+          const timeoutRef = useRef(null);
+
+          // 初始化 Audio
+          useEffect(() => {
+            const audio = new Audio(DEFAULT_AUDIO_URL);
+            audio.loop = true; 
+            audio.volume = volume;
+            audioRef.current = audio;
+
+            const updateProgress = () => {
+                if (!isDraggingProgress.current && audio.duration) {
+                    const progress = (audio.currentTime / audio.duration) * 100;
+                    setMusicProgress(progress || 0);
+                }
+            };
+            
+            const handleCanPlay = () => {
+                setIsMusicLoading(false);
+                setMusicError(false);
+            };
+
+            const handleWaiting = () => {
+                if (isMusicPlaying) setIsMusicLoading(true);
+            };
+
+            const handleError = (e) => {
+                console.error("Audio Load Error:", e);
+                setIsMusicLoading(false);
+                setMusicError(true);
+                setIsMusicPlaying(false);
+            };
+
+            audio.addEventListener('timeupdate', updateProgress);
+            audio.addEventListener('canplay', handleCanPlay);
+            audio.addEventListener('waiting', handleWaiting);
+            audio.addEventListener('error', handleError);
+
+            return () => {
+                audio.pause();
+                audio.removeEventListener('timeupdate', updateProgress);
+                audio.removeEventListener('canplay', handleCanPlay);
+                audio.removeEventListener('waiting', handleWaiting);
+                audio.removeEventListener('error', handleError);
+                audioRef.current = null;
+            };
+          }, []);
+
+          // 控制播放/暫停 - 加入更穩健的錯誤處理
+          useEffect(() => {
+            const audio = audioRef.current;
+            if (audio) {
+                if (isMusicPlaying) {
+                    const playPromise = audio.play();
+                    if (playPromise !== undefined) {
+                        playPromise
+                            .then(() => {
+                                setIsMusicLoading(false);
+                                setMusicError(false);
+                            })
+                            .catch(e => {
+                                if (e.name !== 'AbortError') {
+                                    console.error("Audio play failed:", e);
+                                    setIsMusicPlaying(false);
+                                    setMusicError(true);
+                                }
+                            });
+                    }
+                } else {
+                    audio.pause();
+                    setIsMusicLoading(false);
+                }
+            }
+          }, [isMusicPlaying]);
+
+          useEffect(() => {
+              if (audioRef.current) {
+                  audioRef.current.volume = isMuted ? 0 : volume;
+              }
+          }, [volume, isMuted]);
+
+          const handleFileUpload = (event) => {
+              const file = event.target.files?.[0];
+              if (file && audioRef.current) {
+                  const fileUrl = URL.createObjectURL(file);
+                  audioRef.current.pause();
+                  setIsMusicPlaying(false);
+                  setIsMusicLoading(true);
+                  setMusicError(false);
+
+                  audioRef.current.src = fileUrl;
+                  audioRef.current.load();
+                  
+                  setTrackName(file.name.replace(/\.[^/.]+$/, ""));
+                  setMusicProgress(0);
+                  
+                  setTimeout(() => setIsMusicPlaying(true), 100);
+              }
+          };
+
+          const resetMusic = () => {
+              if (audioRef.current) {
+                  audioRef.current.pause();
+                  setIsMusicPlaying(false);
+                  setIsMusicLoading(true);
+                  setMusicError(false);
+
+                  audioRef.current.src = DEFAULT_AUDIO_URL;
+                  audioRef.current.load();
+                  
+                  setTrackName(DEFAULT_TRACK_NAME);
+                  setMusicProgress(0);
+                  
+                  setTimeout(() => setIsMusicPlaying(true), 100);
+              }
+          };
+
+          useEffect(() => {
+            isTrainingRef.current = isTraining;
+          }, [isTraining]);
+
+          useEffect(() => {
+            speedRef.current = speed;
+          }, [speed]);
+
+          // --- 螢幕尺寸偵測 (優化版) ---
+          useEffect(() => {
+            const handleResize = () => {
+              const screenWidth = window.innerWidth;
+              const padding = screenWidth < 768 ? 20 : 48; 
+              const sidebarWidth = 380; 
+              const maxDesktopSize = 42; 
+              const minMobileSize = 12;  
+              
+              let availableWidthForMaze = 0;
+              if (screenWidth >= 1024) {
+                  availableWidthForMaze = Math.min(screenWidth - sidebarWidth - padding * 2, 700);
+              } else {
+                  availableWidthForMaze = Math.min(screenWidth - padding, 600);
+              }
+              
+              let newSize = Math.floor(availableWidthForMaze / COLS);
+              newSize = Math.max(minMobileSize, Math.min(newSize, maxDesktopSize));
+              setCellSize(newSize);
+            };
+
+            window.addEventListener('resize', handleResize);
+            handleResize(); 
+            return () => window.removeEventListener('resize', handleResize);
+          }, []);
+
+          useEffect(() => {
+              rewardsRef.current = rewards;
+          }, [rewards]);
+
+          const initMaze = useCallback(() => {
+            const { grid: newGrid, start, end } = generateMaze(ROWS, COLS);
+            setGrid(newGrid);
+            setStartPos(start);
+            setAgentPos(start);
+            agentPosRef.current = start; 
+            setEpisode(0);
+            setSteps(0);
+            setCurrentScore(0);
+            setTotalSuccess(0);
+            setTick(0);
+            setBestPath(new Set()); 
+            setVictoryData(null); 
+            
+            gridRef.current = newGrid;
+            startRef.current = start;
+            endRef.current = end;
+            agentRef.current = new QAgent();
+            currentEpisodeStepsRef.current = 0;
+            currentEpisodeScoreRef.current = 0;
+            
+            if (trainingLoopRef.current) cancelAnimationFrame(trainingLoopRef.current);
+            if (timeoutRef.current) clearTimeout(timeoutRef.current);
+            setIsTraining(false);
+          }, []);
+
+          useEffect(() => {
+            initMaze();
+            return () => {
+              if (trainingLoopRef.current) cancelAnimationFrame(trainingLoopRef.current);
+              if (timeoutRef.current) clearTimeout(timeoutRef.current);
+            };
+          }, [initMaze]);
+
+          const handleHumanMove = useCallback((dr, dc) => {
+                if (victoryData) return; 
+
+                const currR = agentPosRef.current.r;
+                const currC = agentPosRef.current.c;
+                const nextR = currR + dr;
+                const nextC = currC + dc;
+                const config = rewardsRef.current;
+
+                if (nextR < 0 || nextR >= ROWS || nextC < 0 || nextC >= COLS || gridRef.current[nextR][nextC] === WALL) {
+                    currentEpisodeScoreRef.current += config.wall;
+                    setCurrentScore(currentEpisodeScoreRef.current);
+                    return;
+                }
+
+                agentPosRef.current = { r: nextR, c: nextC };
+                setAgentPos({ r: nextR, c: nextC });
+                
+                currentEpisodeStepsRef.current += 1;
+                setSteps(currentEpisodeStepsRef.current);
+
+                let reward = config.step; 
+
+                if (gridRef.current[nextR][nextC] === END) {
+                    reward += config.goal;
+                    currentEpisodeScoreRef.current += reward;
+                    setCurrentScore(currentEpisodeScoreRef.current);
+                    
+                    setVictoryData({ show: true, steps: currentEpisodeStepsRef.current });
+                    
+                } else {
+                     if (config.distance > 0) {
+                        const maxDist = ROWS + COLS;
+                        const dist = Math.abs(nextR - endRef.current.r) + Math.abs(nextC - endRef.current.c);
+                        const distBonus = (1 - dist / maxDist) * config.distance;
+                        reward += distBonus;
+                    }
+                    currentEpisodeScoreRef.current += reward;
+                    setCurrentScore(currentEpisodeScoreRef.current);
+                }
+          }, [victoryData]); 
+
+          useEffect(() => {
+            if (gameMode !== 'human') return;
+
+            const handleKeyDown = (e) => {
+                let dr = 0, dc = 0;
+                if (e.key === 'ArrowUp' || e.key === 'w') dr = -1;
+                else if (e.key === 'ArrowDown' || e.key === 's') dr = 1;
+                else if (e.key === 'ArrowLeft' || e.key === 'a') dc = -1;
+                else if (e.key === 'ArrowRight' || e.key === 'd') dc = 1;
+                else return;
+
+                e.preventDefault();
+                handleHumanMove(dr, dc);
+            };
+
+            window.addEventListener('keydown', handleKeyDown);
+            return () => window.removeEventListener('keydown', handleKeyDown);
+          }, [gameMode, handleHumanMove]);
+
+
+          const step = (currentPos) => {
+            const { r, c } = currentPos;
+            const agent = agentRef.current;
+            const config = rewardsRef.current;
+            
+            currentEpisodeStepsRef.current += 1;
+
+            if (config.enableTimeLimit && currentEpisodeStepsRef.current >= config.timeLimit) {
+                const penalty = config.timeoutPenalty;
+                agent.update(r, c, 0, penalty, r, c, true);
+                currentEpisodeScoreRef.current += penalty; 
+                return { nextPos: {r, c}, isDone: true, isTimeout: true };
+            }
+            
+            const action = agent.chooseAction(r, c);
+            const { dr, dc } = DIRECTIONS[action];
+            const nextR = r + dr;
+            const nextC = c + dc;
+
+            let reward = config.step;
+            let isDone = false;
+            let nextPos = { r: nextR, c: nextC };
+
+            if (nextR < 0 || nextR >= ROWS || nextC < 0 || nextC >= COLS || gridRef.current[nextR][nextC] === WALL) {
+              reward += config.wall;
+              nextPos = { r, c }; 
+            } else if (gridRef.current[nextR][nextC] === END) {
+              reward += config.goal;
+              isDone = true;
+            } else {
+                if (config.distance > 0) {
+                    const maxDist = ROWS + COLS;
+                    const dist = Math.abs(nextR - endRef.current.r) + Math.abs(nextC - endRef.current.c);
+                    const distBonus = (1 - dist / maxDist) * config.distance;
+                    reward += distBonus;
+                }
+            }
+
+            currentEpisodeScoreRef.current += reward; 
+            agent.update(r, c, action, reward, nextPos.r, nextPos.c, isDone);
+            return { nextPos, isDone, isTimeout: false };
+          };
+
+          const trainingLoop = () => {
+            if (!isTrainingRef.current) return;
+
+            const currentSpeed = speedRef.current;
+            let loopCount = 1;
+            if (currentSpeed === 'normal') loopCount = 1;
+            if (currentSpeed === 'fast') loopCount = 5;
+            if (currentSpeed === 'warp') loopCount = 100;
+
+            let tempPos = agentPosRef.current;
+            let batchSteps = 0;
+
+            for (let i = 0; i < loopCount; i++) {
+                const { nextPos, isDone } = step(tempPos);
+                tempPos = nextPos;
+                batchSteps++;
+
+                if (isDone) {
+                    agentRef.current.decayEpsilon(episode + 1); 
+                    setEpisode(prev => prev + 1);
+                    if (gridRef.current[tempPos.r][tempPos.c] === END) {
+                        setTotalSuccess(prev => prev + 1);
+                        const newBestPath = agentRef.current.getBestPath(startRef.current, endRef.current, gridRef.current);
+                        setBestPath(newBestPath);
+                    }
+                    currentEpisodeStepsRef.current = 0;
+                    currentEpisodeScoreRef.current = 0; 
+                    setSteps(0);
+                    tempPos = startRef.current;
+                    if (currentSpeed !== 'warp') break; 
+                }
+            }
+
+            agentPosRef.current = tempPos;
+            setAgentPos(tempPos);
+            
+            if (batchSteps > 0) {
+                setSteps(currentEpisodeStepsRef.current);
+                setCurrentScore(currentEpisodeScoreRef.current); 
+            }
+            
+            setTick(prev => prev + 1);
+
+            let delay = 0;
+            if (currentSpeed === 'slow') delay = 100;
+            if (currentSpeed === 'normal') delay = 30;
+            if (currentSpeed === 'fast') delay = 0;
+            
+            if (delay > 0) {
+                timeoutRef.current = setTimeout(() => {
+                    if (isTrainingRef.current) { 
+                        trainingLoopRef.current = requestAnimationFrame(trainingLoop);
+                    }
+                }, delay);
+            } else {
+                trainingLoopRef.current = requestAnimationFrame(trainingLoop);
+            }
+          };
+
+          useEffect(() => {
+            const stop = () => {
+                if (trainingLoopRef.current) cancelAnimationFrame(trainingLoopRef.current);
+                if (timeoutRef.current) clearTimeout(timeoutRef.current);
+            };
+
+            if (isTraining && gameMode === 'ai') {
+              trainingLoopRef.current = requestAnimationFrame(trainingLoop);
+            } else {
+              stop();
+            }
+            return stop;
+          }, [isTraining, gameMode]); 
+
+          // --- Apple Style 渲染邏輯 ---
+          const systemBlue = isDarkMode ? '#0A84FF' : '#007AFF';
+          const separatorColor = isDarkMode ? 'border-[#38383A]' : 'border-[#E5E5EA]';
+          const systemBackground = isDarkMode ? 'bg-black' : 'bg-[#F2F2F7]';
+          const systemText = isDarkMode ? 'text-white' : 'text-black';
+          const systemSecondaryText = isDarkMode ? 'text-[#8E8E93]' : 'text-[#8E8E93]';
+          const iconClass = isDarkMode ? "text-zinc-400" : "text-gray-500";
+          const textTitleClass = isDarkMode ? "text-zinc-400" : "text-gray-500";
+          const textValueClass = isDarkMode ? "text-white" : "text-gray-900";
+
+          const getCellClass = (r, c, type) => {
+            const isAgent = agentPos.r === r && agentPos.c === c;
+            let baseClass = `w-full h-full flex items-center justify-center transition-colors duration-200 ${isDarkMode ? 'border-[0.5px] border-[#38383A]/30' : 'border-[0.5px] border-[#E5E5EA]/80'} `;
+            
+            if (type === WALL) {
+                return baseClass + (isDarkMode ? "bg-[#2C2C2E] rounded-md" : "bg-[#D1D1D6] rounded-md"); 
+            }
+            let contentClass = baseClass + (isDarkMode ? "bg-[#1C1C1E]/50 " : "bg-white ");
+
+            if (isAgent) { return baseClass + "relative z-20"; }
+            if (type === START || type === END) { return contentClass; }
+            const key = `${r},${c}`;
+            if (bestPath.has(key) && type === PATH) { return contentClass + (isDarkMode ? "bg-[#30D158]/20" : "bg-[#34C759]/20"); }
+
+            const qVals = agentRef.current.qTable[key];
+            if (qVals) {
+                const maxQ = Math.max(...qVals);
+                const hasVisited = qVals.some(v => v !== 0);
+                if (maxQ > rewards.goal * 0.5) return contentClass + (isDarkMode ? "bg-[#0A84FF]/30" : "bg-[#007AFF]/20"); 
+                if (maxQ > 0) return contentClass + (isDarkMode ? "bg-[#0A84FF]/15" : "bg-[#007AFF]/10"); 
+                if (hasVisited) return contentClass + (isDarkMode ? "bg-[#2C2C2E]/50" : "bg-[#F2F2F7]"); 
+            }
+            return contentClass;
+          };
+
+          const currentQValues = agentRef.current.getQValues(agentPos.r, agentPos.c);
+          
+          const getQColor = (val) => {
+              if (val > 20) return `${isDarkMode ? 'bg-[#30D158]/20 border-[#30D158]/30' : 'bg-[#34C759]/10 border-[#34C759]/20'} ${isDarkMode ? 'text-[#30D158]' : 'text-[#248A3D]'}`; 
+              if (val > 0) return `${isDarkMode ? 'bg-[#0A84FF]/20 border-[#0A84FF]/30' : 'bg-[#007AFF]/10 border-[#007AFF]/20'} ${isDarkMode ? 'text-[#0A84FF]' : 'text-[#007AFF]'}`;    
+              if (val === 0) return `${isDarkMode ? 'bg-[#3A3A3C] border-[#38383A]' : 'bg-[#F2F2F7] border-[#E5E5EA]'} ${isDarkMode ? 'text-[#8E8E93]' : 'text-[#8E8E93]'}`; 
+              if (val > -10) return `${isDarkMode ? 'bg-[#FF9F0A]/20 border-[#FF9F0A]/30' : 'bg-[#FF9500]/10 border-[#FF9500]/20'} ${isDarkMode ? 'text-[#FF9F0A]' : 'text-[#FF9500]'}`; 
+              return `${isDarkMode ? 'bg-[#FF453A]/20 border-[#FF453A]/30' : 'bg-[#FF3B30]/10 border-[#FF3B30]/20'} ${isDarkMode ? 'text-[#FF453A]' : 'text-[#FF3B30]'}`; 
+          };
+
+          const panelBaseClass = `
+            backdrop-blur-xl border rounded-[24px] p-6 shadow-sm relative overflow-hidden transition-all duration-300
+            ${isDarkMode ? 'bg-[#1C1C1E]/80 border-[#38383A]' : 'bg-white/80 border-white/60 shadow-[0_4px_20px_rgba(0,0,0,0.03)]'}
+          `;
+
+          const renderBrainStatePanel = (mode) => {
+              const visibilityClass = mode === 'mobile-top' ? 'lg:hidden mb-6' : 'hidden lg:block order-first lg:order-none';
+              
+              if (gameMode === 'human') {
+                   return (
+                    <div className={`${panelBaseClass} ${visibilityClass} flex flex-col items-center justify-center min-h-[240px]`}>
+                         <h2 className={`text-[13px] font-semibold ${textTitleClass} mb-6 tracking-wide uppercase flex items-center gap-2`}>
+                            <Gamepad2 className="w-4 h-4" /> 手動控制
+                         </h2>
+                         
+                         {/* D-Pad */}
+                         <div className={`${isDarkMode ? 'bg-[#2C2C2E]' : 'bg-[#F2F2F7]'} rounded-[28px] p-4`}>
+                             <div className="grid grid-cols-3 gap-2">
+                                <div />
+                                <button 
+                                    className={`w-14 h-14 ${isDarkMode ? 'bg-[#3A3A3C] active:bg-[#48484A]' : 'bg-white active:bg-[#E5E5EA] shadow-sm'} rounded-[14px] flex items-center justify-center transition-all duration-200`}
+                                    onPointerDown={(e) => { e.preventDefault(); handleHumanMove(-1, 0); }}
+                                >
+                                    <ChevronUp className={`w-6 h-6 ${systemText}`} />
+                                </button>
+                                <div />
+
+                                <button 
+                                    className={`w-14 h-14 ${isDarkMode ? 'bg-[#3A3A3C] active:bg-[#48484A]' : 'bg-white active:bg-[#E5E5EA] shadow-sm'} rounded-[14px] flex items-center justify-center transition-all duration-200`}
+                                    onPointerDown={(e) => { e.preventDefault(); handleHumanMove(0, -1); }}
+                                >
+                                    <ChevronLeft className={`w-6 h-6 ${systemText}`} />
+                                </button>
+                                <div className="w-14 h-14 flex items-center justify-center">
+                                    <div className={`w-2 h-2 ${isDarkMode ? 'bg-white/20' : 'bg-black/10'} rounded-full`}></div>
+                                </div>
+                                <button 
+                                    className={`w-14 h-14 ${isDarkMode ? 'bg-[#3A3A3C] active:bg-[#48484A]' : 'bg-white active:bg-[#E5E5EA] shadow-sm'} rounded-[14px] flex items-center justify-center transition-all duration-200`}
+                                    onPointerDown={(e) => { e.preventDefault(); handleHumanMove(0, 1); }}
+                                >
+                                    <ChevronRight className={`w-6 h-6 ${systemText}`} />
+                                </button>
+
+                                <div />
+                                <button 
+                                    className={`w-14 h-14 ${isDarkMode ? 'bg-[#3A3A3C] active:bg-[#48484A]' : 'bg-white active:bg-[#E5E5EA] shadow-sm'} rounded-[14px] flex items-center justify-center transition-all duration-200`}
+                                    onPointerDown={(e) => { e.preventDefault(); handleHumanMove(1, 0); }}
+                                >
+                                    <ChevronDown className={`w-6 h-6 ${systemText}`} />
+                                </button>
+                                <div />
+                             </div>
+                         </div>
+                    </div>
+                   );
+              }
+
+              return (
+                <div className={`${panelBaseClass} ${visibilityClass}`}>
+                    <div className="flex items-center justify-between mb-6">
+                        <h2 className={`text-[13px] font-semibold ${textTitleClass} uppercase tracking-wide flex items-center gap-2`}>
+                            <Activity className="w-4 h-4" /> 神經網絡狀態
+                        </h2>
+                        <div className={`px-2 py-0.5 rounded-full ${isDarkMode ? 'bg-[#0A84FF]/20' : 'bg-[#007AFF]/10'}`}>
+                            <span className={`text-[11px] font-semibold ${isDarkMode ? 'text-[#0A84FF]' : 'text-[#007AFF]'}`}>Q-Learning</span>
+                        </div>
+                    </div>
+                    
+                    <div className="flex flex-col items-center justify-center font-sans">
+                        <div className="grid grid-cols-3 gap-3">
+                            <div />
+                            <div className={`w-20 h-16 flex flex-col items-center justify-center rounded-[18px] border transition-all duration-300 ${getQColor(currentQValues[0])}`}>
+                                <span className="opacity-60 text-[10px] font-medium mb-0.5">上</span>
+                                <span className="text-[17px] font-semibold leading-none">{currentQValues[0].toFixed(0)}</span>
+                            </div>
+                            <div />
+
+                            <div className={`w-20 h-16 flex flex-col items-center justify-center rounded-[18px] border transition-all duration-300 ${getQColor(currentQValues[3])}`}>
+                                <span className="opacity-60 text-[10px] font-medium mb-0.5">左</span>
+                                <span className="text-[17px] font-semibold leading-none">{currentQValues[3].toFixed(0)}</span>
+                            </div>
+                            
+                            <div className={`w-20 h-16 ${isDarkMode ? 'bg-[#2C2C2E] border-[#38383A]' : 'bg-[#F2F2F7] border-[#E5E5EA]'} rounded-[18px] flex items-center justify-center border`}>
+                                <div className={`w-4 h-4 ${isDarkMode ? 'bg-[#0A84FF]' : 'bg-[#007AFF]'} rounded-full shadow-sm`}></div>
+                            </div>
+
+                            <div className={`w-20 h-16 flex flex-col items-center justify-center rounded-[18px] border transition-all duration-300 ${getQColor(currentQValues[1])}`}>
+                                    <span className="opacity-60 text-[10px] font-medium mb-0.5">右</span>
+                                    <span className="text-[17px] font-semibold leading-none">{currentQValues[1].toFixed(0)}</span>
+                            </div>
+
+                            <div />
+                            <div className={`w-20 h-16 flex flex-col items-center justify-center rounded-[18px] border transition-all duration-300 ${getQColor(currentQValues[2])}`}>
+                                    <span className="opacity-60 text-[10px] font-medium mb-0.5">下</span>
+                                    <span className="text-[17px] font-semibold leading-none">{currentQValues[2].toFixed(0)}</span>
+                            </div>
+                            <div />
+                        </div>
+                    </div>
+                </div>
+              );
+          }
+
+          return (
+            <div className={`min-h-screen ${systemBackground} ${systemText} font-sans flex flex-col items-center justify-center p-4 md:p-6 relative transition-colors duration-500`}>
+              
+              <div className={`text-center mb-4 md:mb-8 relative z-10 w-full max-w-7xl flex justify-between items-end border-b ${separatorColor} pb-4 md:pb-6`}>
+                <div className="text-left">
+                    <h1 className={`text-2xl md:text-[34px] font-bold tracking-tight ${isDarkMode ? 'text-white' : 'text-zinc-900'} flex items-center gap-3`}>
+                    <Cpu className={`w-6 h-6 md:w-8 md:h-8 ${isDarkMode ? 'text-zinc-400' : 'text-zinc-600'}`} />
+                    像素迷宮 AI
+                    </h1>
+                    <p className={`${isDarkMode ? 'text-zinc-500' : 'text-zinc-500'} text-[13px] md:text-[15px] font-medium mt-1 ml-9 md:ml-11`}>
+                    強化學習實驗室
+                    </p>
+                </div>
+                <div className="flex items-center gap-4">
+                     <button
+                        onClick={() => setIsDarkMode(!isDarkMode)}
+                        className={`p-2.5 rounded-full transition-all active:scale-95 ${isDarkMode ? 'bg-[#2C2C2E] text-white hover:bg-[#3A3A3C]' : 'bg-white text-black hover:bg-[#F2F2F7] shadow-sm border border-[#E5E5EA]'}`}
+                     >
+                         {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                     </button>
+                </div>
+              </div>
+
+              <div className="flex flex-col lg:flex-row gap-6 md:gap-8 items-start w-full max-w-7xl justify-center relative z-10">
+                
+                <div className="flex flex-col w-full lg:w-auto">
+                    
+                    {renderBrainStatePanel('mobile-top')}
+
+                    <div className="w-full flex justify-between items-center mb-4 px-2">
+                        <div className="flex items-center gap-2">
+                            <Grid className={`w-4 h-4 ${iconClass}`} />
+                            <span className={`${textTitleClass} font-medium text-[13px] tracking-wider uppercase`}>區域地圖</span>
+                        </div>
+                        
+                        <button 
+                            onClick={() => initMaze()}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[13px] font-medium transition-all active:scale-95 shadow-sm ${isDarkMode ? 'bg-[#2C2C2E] text-white hover:bg-[#3A3A3C]' : 'bg-white text-black hover:bg-[#F2F2F7] border border-[#E5E5EA]'}`}
+                        >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            重新生成
+                        </button>
+                    </div>
+
+                    <div className={`relative p-3 md:p-6 rounded-[24px] md:rounded-[32px] border shadow-2xl backdrop-blur-md mx-auto lg:mx-0 transition-all duration-500 ${isDarkMode ? 'bg-[#1C1C1E]/60 border-white/5' : 'bg-white/60 border-white shadow-[0_8px_30px_rgba(0,0,0,0.04)]'}`}>
+                        <div 
+                            className={`grid gap-px rounded-[12px] md:rounded-[16px] overflow-hidden border ${isDarkMode ? 'bg-[#2C2C2E] border-white/5' : 'bg-[#E5E5EA] border-[#E5E5EA]'}`}
+                            style={{ 
+                                gridTemplateColumns: `repeat(${COLS}, ${cellSize}px)`,
+                                gridTemplateRows: `repeat(${ROWS}, ${cellSize}px)`
+                            }}
+                        >
+                            {grid.map((row, r) => 
+                                row.map((cell, c) => (
+                                    <div key={`${r}-${c}`} className={getCellClass(r, c, cell)} style={{ width: cellSize, height: cellSize }}>
+                                        {cell === START && !(agentPos.r === r && agentPos.c === c) && 
+                                            <div className={`w-3 h-3 ${isDarkMode ? 'bg-[#30D158]' : 'bg-[#34C759]'} rounded-full shadow-sm`}></div>
+                                        }
+                                        {cell === END && !(agentPos.r === r && agentPos.c === c) && 
+                                            <div className={`w-3 h-3 ${isDarkMode ? 'bg-[#FF453A]' : 'bg-[#FF3B30]'} rounded-full shadow-sm`}></div>
+                                        }
+                                        
+                                        {agentPos.r === r && agentPos.c === c && (
+                                            <div className={`w-[70%] h-[70%] ${isDarkMode ? 'bg-[#0A84FF]' : 'bg-[#007AFF]'} rounded-full shadow-md relative`}>
+                                                <div className="absolute inset-0 bg-white rounded-full animate-ping opacity-25"></div>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </div>
+
+                <div className="w-full lg:w-96 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-6">
+                    
+                    {renderBrainStatePanel('desktop-sidebar')}
+
+                    <div className={panelBaseClass}>
+                        <h2 className={`text-[13px] font-semibold ${textTitleClass} mb-6 uppercase tracking-wide flex items-center gap-2`}>
+                            <Zap className="w-4 h-4" /> 控制中心
+                        </h2>
+                        <div className="flex gap-3 mb-6">
+                            {gameMode === 'ai' ? (
+                                <button 
+                                    onClick={() => setIsTraining(!isTraining)}
+                                    className={`flex-1 h-[44px] flex items-center justify-center gap-2 rounded-[12px] font-semibold text-[15px] transition-all active:scale-[0.98] ${
+                                        isTraining 
+                                        ? `${isDarkMode ? 'bg-[#FF453A] text-white shadow-red-900/20' : 'bg-[#FF3B30] text-white shadow-red-200'}` 
+                                        : `${isDarkMode ? 'bg-white text-black' : 'bg-black text-white'}`
+                                    }`}
+                                >
+                                    {isTraining ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                                    {isTraining ? "暫停" : "開始"}
+                                </button>
+                            ) : (
+                                <div className={`flex-1 h-[44px] rounded-[12px] flex items-center justify-center text-[13px] font-medium ${isDarkMode ? 'bg-[#2C2C2E] text-[#8E8E93]' : 'bg-[#F2F2F7] text-[#8E8E93]'}`}>
+                                    等待鍵盤輸入...
+                                </div>
+                            )}
+                            
+                            <button 
+                                onClick={() => initMaze()}
+                                className={`h-[44px] w-[44px] flex items-center justify-center rounded-[12px] transition-all active:scale-[0.98] ${isDarkMode ? 'bg-[#2C2C2E] hover:bg-[#3A3A3C] text-white' : 'bg-white hover:bg-gray-50 text-black border border-[#E5E5EA] shadow-sm'}`}
+                                title="重置"
+                            >
+                                <RotateCcw className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        {gameMode === 'ai' && (
+                            <div className={`${isDarkMode ? 'bg-[#2C2C2E]' : 'bg-[#E5E5EA]'} p-[2px] rounded-[10px] flex`}>
+                                {[
+                                    { id: 'slow', label: '慢速' },
+                                    { id: 'normal', label: '正常' },
+                                    { id: 'fast', label: '快速' },
+                                    { id: 'warp', label: '極速' }
+                                ].map((mode) => (
+                                    <button
+                                        key={mode.id}
+                                        onClick={() => setSpeed(mode.id)}
+                                        className={`flex-1 py-1.5 rounded-[8px] text-[13px] font-medium transition-all ${
+                                            speed === mode.id 
+                                            ? `${isDarkMode ? 'bg-[#636366] text-white shadow-sm' : 'bg-white text-black shadow-sm'}` 
+                                            : `${isDarkMode ? 'text-[#8E8E93] hover:text-white' : 'text-[#8E8E93] hover:text-black'}`
+                                        }`}
+                                    >
+                                        {mode.label}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className={panelBaseClass}>
+                        <h2 className={`text-[13px] font-semibold ${textTitleClass} mb-6 uppercase tracking-wide flex items-center gap-2`}>
+                            <Brain className="w-4 h-4" /> 數據分析
+                        </h2>
+                        <div className="space-y-4">
+                            {gameMode === 'ai' && (
+                                <div className={`flex justify-between items-center ${separatorColor} border-b pb-3`}>
+                                    <span className={`text-[15px] ${systemSecondaryText}`}>分數</span>
+                                    <span className={`text-[17px] font-semibold ${currentScore >= 0 ? (isDarkMode ? 'text-[#30D158]' : 'text-[#248A3D]') : (isDarkMode ? 'text-[#FF453A]' : 'text-[#FF3B30]')}`}>
+                                        {currentScore.toFixed(0)}
+                                    </span>
+                                </div>
+                            )}
+                            {gameMode === 'ai' && (
+                                <>
+                                    <div className={`flex justify-between items-center ${separatorColor} border-b pb-3`}>
+                                        <span className={`text-[15px] ${systemSecondaryText}`}>世代 (Episode)</span>
+                                        <span className={`text-[17px] ${systemText} font-mono`}>{episode}</span>
+                                    </div>
+                                    <div className={`flex justify-between items-center ${separatorColor} border-b pb-3`}>
+                                        <span className={`text-[15px] ${systemSecondaryText}`}>探索率 (Exp)</span>
+                                        <div className="flex items-center gap-3">
+                                            <div className={`w-20 h-1.5 rounded-full overflow-hidden ${isDarkMode ? 'bg-[#2C2C2E]' : 'bg-[#E5E5EA]'}`}>
+                                                <div className={`h-full rounded-full ${isDarkMode ? 'bg-[#0A84FF]' : 'bg-[#007AFF]'}`} style={{ width: `${agentRef.current.epsilon * 100}%` }}></div>
+                                            </div>
+                                            <span className={`text-[13px] ${systemSecondaryText} font-mono w-8 text-right`}>{(agentRef.current.epsilon * 100).toFixed(0)}%</span>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                            <div className={`flex justify-between items-center ${separatorColor} border-b pb-3`}>
+                                <span className={`text-[15px] ${systemSecondaryText}`}>當前步數</span>
+                                <div className="flex items-center gap-2">
+                                    <span className={`text-[17px] font-mono ${rewards.enableTimeLimit && steps > rewards.timeLimit * 0.8 ? (isDarkMode ? 'text-[#FF453A]' : 'text-[#FF3B30]') : systemText}`}>
+                                        {steps}
+                                    </span>
+                                    {rewards.enableTimeLimit && <span className={`text-[13px] ${systemSecondaryText}`}>/ {rewards.timeLimit}</span>}
+                                </div>
+                            </div>
+                            {gameMode === 'ai' && (
+                                 <div className="flex justify-between items-center pt-1">
+                                    <span className={`text-[15px] ${systemSecondaryText}`}>成功次數</span>
+                                    <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md ${isDarkMode ? 'bg-[#30D158]/10' : 'bg-[#34C759]/10'}`}>
+                                        <Trophy className={`w-3.5 h-3.5 ${isDarkMode ? 'text-[#30D158]' : 'text-[#248A3D]'}`} />
+                                        <span className={`text-[13px] font-semibold ${isDarkMode ? 'text-[#30D158]' : 'text-[#248A3D]'}`}>{totalSuccess}</span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className={panelBaseClass}>
+                        <h2 className={`text-[13px] font-semibold ${textTitleClass} mb-6 uppercase tracking-wide flex items-center gap-2`}>
+                            <Sliders className="w-4 h-4" /> 設定
+                        </h2>
+                        <div className="space-y-6">
+                            <div className={`${isDarkMode ? 'bg-[#2C2C2E]' : 'bg-[#E5E5EA]'} p-[2px] rounded-[9px] flex relative`}>
+                                <div 
+                                    className={`absolute top-[2px] bottom-[2px] w-[calc(50%-2px)] rounded-[7px] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] ${
+                                        gameMode === 'human' ? 'translate-x-[100%]' : 'translate-x-0'
+                                    } ${isDarkMode ? 'bg-[#636366]' : 'bg-white'}`}
+                                ></div>
+                                <button 
+                                    onClick={() => {
+                                        setGameMode('ai');
+                                        setIsTraining(false);
+                                        agentPosRef.current = startRef.current;
+                                        setAgentPos(startRef.current);
+                                    }}
+                                    className={`flex-1 py-1 text-[13px] font-medium rounded-[7px] relative z-10 transition-colors ${gameMode === 'ai' ? (isDarkMode ? 'text-white' : 'text-black') : (isDarkMode ? 'text-[#8E8E93]' : 'text-[#8E8E93]')}`}
+                                >
+                                    AI 代理
+                                </button>
+                                <button 
+                                    onClick={() => {
+                                        setGameMode('human');
+                                        setIsTraining(false);
+                                        agentPosRef.current = startRef.current;
+                                        setAgentPos(startRef.current);
+                                        setCurrentScore(0);
+                                        setSteps(0);
+                                        currentEpisodeScoreRef.current = 0;
+                                        currentEpisodeStepsRef.current = 0;
+                                    }}
+                                    className={`flex-1 py-1 text-[13px] font-medium rounded-[7px] relative z-10 transition-colors ${gameMode === 'human' ? (isDarkMode ? 'text-white' : 'text-black') : (isDarkMode ? 'text-[#8E8E93]' : 'text-[#8E8E93]')}`}
+                                >
+                                    手動操作
+                                </button>
+                            </div>
+
+                            {gameMode === 'ai' && (
+                                <div className="space-y-5">
+                                    <div className="flex items-center justify-between">
+                                        <span className={`text-[15px] ${systemText}`}>步數限制</span>
+                                        <IOSSwitch 
+                                            checked={rewards.enableTimeLimit} 
+                                            onChange={() => setRewards(r => ({...r, enableTimeLimit: !r.enableTimeLimit}))} 
+                                        />
+                                    </div>
+                                    
+                                    {rewards.enableTimeLimit && (
+                                        <div className={`space-y-4 pt-4 border-t animate-in slide-in-from-top-2 fade-in duration-300 ${separatorColor}`}>
+                                            <div>
+                                                <div className="flex justify-between mb-2">
+                                                    <span className={`text-[13px] ${systemSecondaryText}`}>最大步數</span>
+                                                    <span className={`text-[13px] font-mono ${systemText}`}>{rewards.timeLimit}</span>
+                                                </div>
+                                                <input 
+                                                    type="range" min="20" max="300" step="10" 
+                                                    value={rewards.timeLimit} 
+                                                    onChange={(e) => setRewards({...rewards, timeLimit: parseInt(e.target.value)})}
+                                                    className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${isDarkMode ? 'bg-[#3A3A3C] accent-[#30D158]' : 'bg-[#E5E5EA] accent-[#34C759]'}`}
+                                                />
+                                            </div>
+                                            <div>
+                                                <div className="flex justify-between mb-2">
+                                                    <span className={`text-[13px] ${systemSecondaryText}`}>超時扣分</span>
+                                                    <span className="text-[13px] font-mono text-[#FF453A]">{rewards.timeoutPenalty}</span>
+                                                </div>
+                                                <input 
+                                                    type="range" min="-100" max="0" step="1" 
+                                                    value={rewards.timeoutPenalty} 
+                                                    onChange={(e) => setRewards({...rewards, timeoutPenalty: parseInt(e.target.value)})}
+                                                    className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${isDarkMode ? 'bg-[#3A3A3C] accent-[#FF453A]' : 'bg-[#E5E5EA] accent-[#FF3B30]'}`}
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className={`space-y-5 pt-4 border-t ${separatorColor}`}>
+                                        {[
+                                            { label: '終點獎勵', val: rewards.goal, key: 'goal', min: 10, max: 500, color: isDarkMode ? 'accent-[#BF5AF2]' : 'accent-[#AF52DE]', text: isDarkMode ? 'text-[#BF5AF2]' : 'text-[#AF52DE]' },
+                                            { label: '撞牆懲罰', val: rewards.wall, key: 'wall', min: -100, max: 0, color: isDarkMode ? 'accent-[#FF453A]' : 'accent-[#FF3B30]', text: isDarkMode ? 'text-[#FF453A]' : 'text-[#FF3B30]' },
+                                            { label: '每步消耗', val: rewards.step, key: 'step', min: -20, max: 0, color: isDarkMode ? 'accent-[#FF9F0A]' : 'accent-[#FF9500]', text: isDarkMode ? 'text-[#FF9F0A]' : 'text-[#FF9500]' },
+                                            { label: '距離獎勵', val: rewards.distance, key: 'distance', min: 0, max: 100, color: isDarkMode ? 'accent-[#0A84FF]' : 'accent-[#007AFF]', text: isDarkMode ? 'text-[#0A84FF]' : 'text-[#007AFF]' },
+                                        ].map((item) => (
+                                            <div key={item.key}>
+                                                <div className="flex justify-between mb-2">
+                                                    <span className={`text-[13px] ${systemSecondaryText}`}>{item.label}</span>
+                                                    <span className={`text-[13px] font-mono font-medium ${item.text}`}>{item.val}</span>
+                                                </div>
+                                                <input 
+                                                    type="range" min={item.min} max={item.max} step="1"
+                                                    value={item.val} 
+                                                    onChange={(e) => setRewards({...rewards, [item.key]: parseInt(e.target.value)})}
+                                                    className={`w-full h-1 rounded-lg appearance-none cursor-pointer ${item.color} ${isDarkMode ? 'bg-[#3A3A3C]' : 'bg-[#E5E5EA]'}`}
+                                                />
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className={panelBaseClass}>
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className={`text-[13px] font-semibold ${textTitleClass} uppercase tracking-wide flex items-center gap-2`}>
+                                <Music className="w-4 h-4" /> 音樂播放器
+                            </h2>
+                            
+                            <div className="flex items-center gap-1">
+                                <button 
+                                    onClick={resetMusic}
+                                    className={`p-2 rounded-full transition-colors ${isDarkMode ? 'text-zinc-400 hover:text-white hover:bg-white/10' : 'text-gray-400 hover:text-black hover:bg-black/5'}`}
+                                    title="恢復預設音樂"
+                                >
+                                    <RefreshCw className="w-4 h-4" />
+                                </button>
+                                <button 
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className={`p-2 rounded-full transition-colors ${isDarkMode ? 'text-zinc-400 hover:text-white hover:bg-white/10' : 'text-gray-400 hover:text-black hover:bg-black/5'}`}
+                                    title="匯入音樂"
+                                >
+                                    <FolderOpen className="w-4 h-4" />
+                                </button>
+                                <input 
+                                    type="file" 
+                                    ref={fileInputRef}
+                                    onChange={handleFileUpload} 
+                                    accept="audio/*" 
+                                    className="hidden" 
+                                />
+                            </div>
+                        </div>
+                        
+                        <div className="flex items-center gap-4 mb-6">
+                            <div className={`w-16 h-16 rounded-[14px] bg-gradient-to-br from-pink-500 to-violet-600 flex items-center justify-center shadow-lg ${isMusicPlaying ? 'scale-105' : 'scale-100'} transition-transform duration-500 relative overflow-hidden`}>
+                                {isMusicPlaying && <div className="absolute inset-0 bg-white/20 animate-pulse" />}
+                                <Music className="text-white w-8 h-8 drop-shadow-md relative z-10" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                {isMusicLoading ? (
+                                    <div className="flex items-center gap-2 text-yellow-500 animate-pulse">
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                        <span className="text-xs font-medium">載入中...</span>
+                                    </div>
+                                ) : musicError ? (
+                                     <div className="flex items-center gap-2 text-red-500">
+                                        <AlertCircle className="w-4 h-4" />
+                                        <span className="text-xs font-medium">載入失敗</span>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <h3 className={`text-[17px] font-semibold ${systemText} leading-tight truncate`}>{trackName}</h3>
+                                        <p className={`text-[13px] ${systemSecondaryText} mt-0.5 truncate`}>Pixel Mix</p>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="space-y-4">
+                            <div className="w-full flex items-center group h-4">
+                                <input 
+                                    type="range" 
+                                    min="0" 
+                                    max="100" 
+                                    step="0.1" 
+                                    value={musicProgress || 0} 
+                                    onPointerDown={() => { isDraggingProgress.current = true; }}
+                                    onPointerUp={() => { isDraggingProgress.current = false; }}
+                                    onChange={(e) => {
+                                        const newProgress = parseFloat(e.target.value);
+                                        setMusicProgress(newProgress);
+                                        if (audioRef.current && audioRef.current.duration) {
+                                            audioRef.current.currentTime = (newProgress / 100) * audioRef.current.duration;
+                                        }
+                                    }}
+                                    className={`
+                                        w-full h-1 rounded-full appearance-none cursor-pointer focus:outline-none
+                                        ${isDarkMode ? 'bg-[#3A3A3C]' : 'bg-[#E5E5EA]'}
+                                        [&::-webkit-slider-thumb]:appearance-none
+                                        [&::-webkit-slider-thumb]:w-2
+                                        [&::-webkit-slider-thumb]:h-2
+                                        [&::-webkit-slider-thumb]:rounded-full
+                                        [&::-webkit-slider-thumb]:bg-current
+                                        [&::-webkit-slider-thumb]:shadow-sm
+                                        [&::-webkit-slider-thumb]:transition-all
+                                        [&::-webkit-slider-thumb]:opacity-0
+                                        group-hover:[&::-webkit-slider-thumb]:opacity-100
+                                        group-hover:[&::-webkit-slider-thumb]:scale-125
+                                        ${isDarkMode ? 'text-white' : 'text-black'}
+                                    `}
+                                    style={{
+                                        backgroundImage: `linear-gradient(to right, currentColor 0%, currentColor ${musicProgress}%, transparent ${musicProgress}%)`,
+                                        backgroundRepeat: 'no-repeat'
+                                    }}
+                                />
+                            </div>
+
+                            <div className="flex items-center justify-center gap-8">
+                                <button 
+                                    onClick={() => setIsMusicPlaying(!isMusicPlaying)}
+                                    className={`w-12 h-12 flex items-center justify-center rounded-full transition-all active:scale-95 shadow-md ${isDarkMode ? 'bg-white text-black hover:bg-gray-100' : 'bg-black text-white hover:bg-gray-800'}`}
+                                >
+                                    {isMusicLoading ? (
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                    ) : isMusicPlaying ? (
+                                        <Pause className="w-5 h-5 fill-current" />
+                                    ) : (
+                                        <Play className="w-5 h-5 fill-current ml-0.5" />
+                                    )}
+                                </button>
+                            </div>
+
+                            <div className="flex items-center gap-3 px-2 pt-2">
+                                <button onClick={() => setIsMuted(!isMuted)} className="focus:outline-none">
+                                    {isMuted || volume === 0 ? (
+                                        <VolumeX className={`w-4 h-4 ${systemSecondaryText}`} />
+                                    ) : (
+                                        <Volume2 className={`w-4 h-4 ${systemSecondaryText}`} />
+                                    )}
+                                </button>
+                                
+                                <div className="flex-1 relative h-6 flex items-center group">
+                                    <input 
+                                        type="range" 
+                                        min="0" 
+                                        max="1" 
+                                        step="0.01" 
+                                        value={volume} 
+                                        onChange={(e) => {
+                                            setVolume(parseFloat(e.target.value));
+                                            setIsMuted(false);
+                                        }}
+                                        className={`
+                                            w-full h-1 rounded-full appearance-none cursor-pointer focus:outline-none
+                                            ${isDarkMode ? 'bg-[#3A3A3C]' : 'bg-[#E5E5EA]'}
+                                            [&::-webkit-slider-thumb]:appearance-none
+                                            [&::-webkit-slider-thumb]:w-3
+                                            [&::-webkit-slider-thumb]:h-3
+                                            [&::-webkit-slider-thumb]:rounded-full
+                                            [&::-webkit-slider-thumb]:bg-white
+                                            [&::-webkit-slider-thumb]:shadow-md
+                                            [&::-webkit-slider-thumb]:transition-all
+                                            group-hover:[&::-webkit-slider-thumb]:scale-125
+                                        `}
+                                        style={{
+                                            backgroundImage: `linear-gradient(to right, ${isDarkMode ? '#9ca3af' : '#4b5563'} 0%, ${isDarkMode ? '#9ca3af' : '#4b5563'} ${volume * 100}%, transparent ${volume * 100}%)`,
+                                            backgroundRepeat: 'no-repeat'
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {victoryData && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm animate-in fade-in duration-300">
+                    <div className={`rounded-[26px] p-8 max-w-xs w-full shadow-2xl text-center transform transition-all scale-100 ${isDarkMode ? 'bg-[#1C1C1E]' : 'bg-white'}`}>
+                        <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6 ${isDarkMode ? 'bg-[#30D158]/20' : 'bg-[#34C759]/10'}`}>
+                          <CheckCircle className={`w-8 h-8 ${isDarkMode ? 'text-[#30D158]' : 'text-[#34C759]'}`} />
+                        </div>
+                        <h2 className={`text-[22px] font-bold mb-2 ${systemText}`}>任務完成</h2>
+                        <p className={`${systemSecondaryText} mb-8 text-[15px]`}>
+                            總步數: <span className={`${systemText} font-semibold`}>{victoryData.steps}</span>
+                        </p>
+                        
+                        <button 
+                            onClick={() => {
+                                setVictoryData(null);
+                                initMaze();
+                            }}
+                            className={`w-full py-3.5 font-semibold rounded-[14px] text-[17px] transition-colors active:scale-[0.98] ${isDarkMode ? 'bg-white text-black hover:bg-[#F2F2F7]' : 'bg-black text-white hover:bg-[#3A3A3C]'}`}
+                        >
+                            下一關
+                        </button>
+                    </div>
+                </div>
+            )}
+          </div>
+        );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<PixelMazeAI />);
+    </script>
+</body>
+</html>
